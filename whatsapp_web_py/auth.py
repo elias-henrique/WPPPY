@@ -1,22 +1,38 @@
 from __future__ import annotations
 
+import logging
 import pickle
+from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Dict, Iterable, List, Optional
 
 from playwright.async_api import BrowserContext, Playwright
 
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
-class AuthStrategy:
+
+def _dedupe_args(args: Optional[Iterable[str]]) -> List[str]:
+    """Remove duplicatas preservando a ordem para evitar erros do Chromium."""
+
+    deduped: List[str] = []
+    for arg in args or []:
+        if arg not in deduped:
+            deduped.append(arg)
+    return deduped
+
+
+class AuthStrategy(ABC):
     """Interface para estratégias de autenticação."""
 
+    @abstractmethod
     async def create_context(
         self,
         playwright: Playwright,
         headless: bool = True,
         user_agent: Optional[str] = None,
         args: Optional[Iterable[str]] = None,
-        proxy: Optional[dict] = None,
+        proxy: Optional[Dict[str, str]] = None,
         bypass_csp: bool = True,
     ) -> BrowserContext:
         raise NotImplementedError
@@ -42,16 +58,10 @@ class LocalAuth(AuthStrategy):
         headless: bool = True,
         user_agent: Optional[str] = None,
         args: Optional[Iterable[str]] = None,
-        proxy: Optional[dict] = None,
+        proxy: Optional[Dict[str, str]] = None,
         bypass_csp: bool = True,
     ) -> BrowserContext:
-        launch_args = list(args or [])
-        # Remove duplicatas para evitar erros de chromium
-        deduped_args = []
-        for arg in launch_args:
-            if arg not in deduped_args:
-                deduped_args.append(arg)
-
+        deduped_args = _dedupe_args(args)
         context = await playwright.chromium.launch_persistent_context(
             user_data_dir=str(self.user_data_dir),
             headless=headless,
@@ -89,25 +99,19 @@ class PickleAuth(AuthStrategy):
         headless: bool = True,
         user_agent: Optional[str] = None,
         args: Optional[Iterable[str]] = None,
-        proxy: Optional[dict] = None,
+        proxy: Optional[Dict[str, str]] = None,
         bypass_csp: bool = True,
     ) -> BrowserContext:
-        launch_args = list(args or [])
-        # Remove duplicatas para evitar erros de chromium
-        deduped_args = []
-        for arg in launch_args:
-            if arg not in deduped_args:
-                deduped_args.append(arg)
+        deduped_args = _dedupe_args(args)
 
-        # Tenta carregar sessão salva
-        storage_state = None
+        storage_state: Optional[dict] = None
         if self.pickle_file.exists():
             try:
                 with open(self.pickle_file, "rb") as f:
                     storage_state = pickle.load(f)
-                print(f"✓ Sessão carregada de {self.pickle_file}")
-            except Exception as e:
-                print(f"⚠ Não foi possível carregar sessão: {e}")
+                logger.info("Sessão carregada de %s", self.pickle_file)
+            except Exception as exc:  # pragma: no cover - resiliência de IO
+                logger.warning("Não foi possível carregar sessão de %s: %s", self.pickle_file, exc)
                 storage_state = None
 
         # Cria o contexto com ou sem storage_state
@@ -142,9 +146,9 @@ class PickleAuth(AuthStrategy):
                                         origin_data["localStorage"]
                                     )
                                 except Exception:
-                                    pass
-            except Exception as e:
-                print(f"⚠ Erro ao restaurar estado: {e}")
+                                    logger.debug("Falha ao restaurar localStorage em uma página.")
+            except Exception as exc:  # pragma: no cover - resiliência de IO/JS
+                logger.warning("Erro ao restaurar estado salvo: %s", exc)
 
         return self._context
 
@@ -157,9 +161,9 @@ class PickleAuth(AuthStrategy):
             storage_state = await self._context.storage_state()
             with open(self.pickle_file, "wb") as f:
                 pickle.dump(storage_state, f)
-            print(f"✓ Sessão salva em {self.pickle_file}")
-        except Exception as e:
-            print(f"⚠ Erro ao salvar sessão: {e}")
+            logger.info("Sessão salva em %s", self.pickle_file)
+        except Exception as exc:  # pragma: no cover - resiliência de IO
+            logger.exception("Erro ao salvar sessão em %s", self.pickle_file, exc_info=exc)
 
     async def destroy(self) -> None:
         """Salva a sessão antes de destruir."""

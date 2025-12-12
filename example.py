@@ -1,59 +1,68 @@
 import asyncio
+import logging
+import signal
+from contextlib import suppress
 
 import qrcode
 
 from whatsapp_web_py import Client, ClientOptions, Events, PickleAuth
 
+logger = logging.getLogger(__name__)
+
 
 def display_qr(qr_string: str) -> None:
     """Gera e exibe o QR code no terminal e salva como imagem."""
-    qr = qrcode.QRCode(version=1, box_size=10, border=4)
+    qr = qrcode.QRCode(version=1, box_size=10, border=2)
     qr.add_data(qr_string)
     qr.make(fit=True)
 
-    # Exibe no terminal
     qr.print_ascii(invert=True)
 
-    # Salva como imagem
     img = qr.make_image(fill_color="black", back_color="white")
     img.save("whatsapp_qr.png")
-    print("\n✓ QR Code salvo em: whatsapp_qr.png")
-    print("Escaneie com seu WhatsApp para conectar!\n")
+    logger.info("QR Code salvo em whatsapp_qr.png. Escaneie para conectar.")
+
+
+def _install_signal_handlers(stop_event: asyncio.Event) -> None:
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with suppress(NotImplementedError):
+            loop.add_signal_handler(sig, stop_event.set)
 
 
 async def main() -> None:
-    # PickleAuth salva a sessão automaticamente
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+
     auth_strategy = PickleAuth(session_name="default")
-    client = Client(ClientOptions(auth_strategy=auth_strategy))
+    options = ClientOptions(auth_strategy=auth_strategy, headless=True)
 
-    client.on(Events.QR, display_qr)
+    async with Client(options) as client:
+        client.on(Events.QR, display_qr)
 
-    # Salva a sessão quando estiver pronto
-    async def on_ready():
-        print("Client is ready!")
-        await auth_strategy.save_session()
+        async def on_ready() -> None:
+            logger.info("Cliente pronto. Persistindo sessão.")
+            await auth_strategy.save_session()
 
-    client.on(Events.READY, on_ready)
-    client.on(Events.MESSAGE, lambda msg: print(f"[{msg.chat_id}] {msg.body}"))
+        async def on_message(msg) -> None:
+            logger.info("[%s] %s", msg.chat_id, msg.body)
 
-    await client.initialize()
-    print("Aguardando autenticação...")
+        client.on(Events.READY, on_ready)
+        client.on(Events.MESSAGE, on_message)
 
-    stop_event = asyncio.Event()
-    try:
+        if not await client.wait_until_ready(timeout=120):
+            raise TimeoutError("Tempo excedido aguardando o WhatsApp ficar pronto.")
+
+        stop_event = asyncio.Event()
+        _install_signal_handlers(stop_event)
+        logger.info("Conectado. Pressione Ctrl+C para encerrar.")
         await stop_event.wait()
-    except KeyboardInterrupt:
-        print("\n\nEncerrando...")
-    finally:
-        try:
-            await client.destroy()
-            print("✓ Cliente encerrado com sucesso")
-        except Exception as e:
-            print(f"Aviso: erro ao encerrar (pode ser ignorado): {e}")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n\nEncerrando...")
+        logger.info("Encerrando por teclado.")

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 
@@ -18,6 +20,9 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+
+logger = logging.getLogger("wwebjs-py")
+logger.addHandler(logging.NullHandler())
 
 
 @dataclass
@@ -50,32 +55,44 @@ class Client(AsyncIOEventEmitter):
         self._store_ready = False
         self._synced_emitted = False
         self._qr_retries = 0
+        self._initialized = False
+        self._bootstrap_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         """Inicia o navegador, navega para o WhatsApp Web e realiza a injeção."""
-        self.playwright = await async_playwright().start()
+        if self._initialized:
+            self.logger.debug("initialize() chamado novamente; ignorando.")
+            return
+
         args = list(self.options.browser_args or [])
         if not any("disable-blink-features=AutomationControlled" in a for a in args):
             args.append("--disable-blink-features=AutomationControlled")
 
-        self.context = await self.options.auth_strategy.create_context(
-            playwright=self.playwright,
-            headless=self.options.headless,
-            user_agent=self.options.user_agent,
-            args=args,
-            proxy=self.options.proxy,
-            bypass_csp=self.options.bypass_csp,
-        )
-        self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+        self.playwright = await async_playwright().start()
+        try:
+            self.context = await self.options.auth_strategy.create_context(
+                playwright=self.playwright,
+                headless=self.options.headless,
+                user_agent=self.options.user_agent,
+                args=args,
+                proxy=self.options.proxy,
+                bypass_csp=self.options.bypass_csp,
+            )
+            self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
 
-        await self.page.add_init_script(self._scripts["moduleraid"])
-        # Pequena proteção para evitar bloqueios de automação
-        await self.page.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
-        )
+            await self.page.add_init_script(self._scripts["moduleraid"])
+            # Pequena proteção para evitar bloqueios de automação
+            await self.page.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+            )
 
-        await self.page.goto(WhatsWebURL, wait_until="domcontentloaded")
-        await self._inject()
+            await self.page.goto(WhatsWebURL, wait_until="domcontentloaded")
+            await self._inject()
+            self._initialized = True
+            self.logger.info("Cliente inicializado e scripts injetados.")
+        except Exception:
+            await self.destroy()
+            raise
 
     async def destroy(self) -> None:
         try:
@@ -83,19 +100,22 @@ class Client(AsyncIOEventEmitter):
                 await self.context.close()
                 self.context = None
         except Exception:
-            pass  # Ignora erros ao fechar contexto
+            self.logger.debug("Ignorando erro ao fechar contexto.", exc_info=True)
 
         try:
             if self.playwright:
                 await self.playwright.stop()
                 self.playwright = None
         except Exception:
-            pass  # Ignora erros ao parar playwright
+            self.logger.debug("Ignorando erro ao parar playwright.", exc_info=True)
 
-        try:
+        with suppress(Exception):
             await self.options.auth_strategy.destroy()
-        except Exception:
-            pass  # Ignora erros ao destruir auth strategy
+
+        self._store_ready = False
+        self._synced_emitted = False
+        self._qr_retries = 0
+        self._initialized = False
 
     # ------------------------------------------------------------------ #
     # Injeção e listeners
@@ -159,26 +179,32 @@ class Client(AsyncIOEventEmitter):
     async def _bootstrap_store(self) -> None:
         if self._store_ready:
             return
-        await self.page.evaluate(wrap_commonjs(self._scripts["store"], "ExposeStore"))
-        await self.page.evaluate(wrap_commonjs(self._scripts["utils"], "LoadUtils"))
+        async with self._bootstrap_lock:
+            if self._store_ready:
+                return
+            if not self.page:
+                raise RuntimeError("Página não inicializada para bootstrap do Store.")
 
-        await self.page.expose_function("_py_on_message", self._handle_message)
-        await self.page.expose_function("_py_on_message_created", self._handle_message_created)
+            await self.page.evaluate(wrap_commonjs(self._scripts["store"], "ExposeStore"))
+            await self.page.evaluate(wrap_commonjs(self._scripts["utils"], "LoadUtils"))
 
-        await self.page.evaluate(
-            """
-            (() => {
-                window.Store.Msg.on('add', (msg) => {
-                    if (!msg.isNewMsg) return;
-                    const model = window.WWebJS.getMessageModel(msg);
-                    window._py_on_message_created(model);
-                    if (!model.id?.fromMe) window._py_on_message(model);
-                });
-            })();
-            """
-        )
+            await self.page.expose_function("_py_on_message", self._handle_message)
+            await self.page.expose_function("_py_on_message_created", self._handle_message_created)
 
-        self._store_ready = True
+            await self.page.evaluate(
+                """
+                (() => {
+                    window.Store.Msg.on('add', (msg) => {
+                        if (!msg.isNewMsg) return;
+                        const model = window.WWebJS.getMessageModel(msg);
+                        window._py_on_message_created(model);
+                        if (!model.id?.fromMe) window._py_on_message(model);
+                    });
+                })();
+                """
+            )
+
+            self._store_ready = True
 
     # ------------------------------------------------------------------ #
     # Event handlers chamados pelo contexto JS
@@ -230,6 +256,10 @@ class Client(AsyncIOEventEmitter):
         if isinstance(content, MessageMedia):
             opts["media"] = content.to_json()
             payload = ""
+        elif isinstance(content, str):
+            payload = content
+            if not payload:
+                raise ValueError("Mensagem vazia não é permitida.")
 
         msg = await self.page.evaluate(
             "(chatId, body, opts) => window.WWebJS.sendMessage(chatId, body, opts)",
@@ -240,21 +270,29 @@ class Client(AsyncIOEventEmitter):
         return Message.from_js(msg) if msg else None
 
     async def get_chats(self) -> List[Chat]:
+        if not self.page:
+            raise RuntimeError("Cliente não inicializado. Chame initialize().")
         await self._bootstrap_store()
         chats = await self.page.evaluate("() => window.WWebJS.getChats()")
         return [Chat.from_js(c) for c in chats]
 
     async def get_contacts(self) -> List[Contact]:
+        if not self.page:
+            raise RuntimeError("Cliente não inicializado. Chame initialize().")
         await self._bootstrap_store()
         contacts = await self.page.evaluate("() => window.WWebJS.getContacts()")
         return [Contact.from_js(c) for c in contacts]
 
     async def get_chat_by_id(self, chat_id: str) -> Optional[Chat]:
+        if not self.page:
+            raise RuntimeError("Cliente não inicializado. Chame initialize().")
         await self._bootstrap_store()
         chat = await self.page.evaluate("(cid) => window.WWebJS.getChat(cid)", chat_id)
         return Chat.from_js(chat) if chat else None
 
     async def get_message_by_id(self, message_id: str) -> Optional[Message]:
+        if not self.page:
+            raise RuntimeError("Cliente não inicializado. Chame initialize().")
         await self._bootstrap_store()
         msg = await self.page.evaluate(
             "(mid) => { const m = window.Store.Msg.get(mid); return m ? window.WWebJS.getMessageModel(m) : null; }",
@@ -262,13 +300,47 @@ class Client(AsyncIOEventEmitter):
         )
         return Message.from_js(msg) if msg else None
 
+    async def wait_until_ready(self, *, timeout: Optional[float] = 90.0) -> bool:
+        """
+        Aguarda o evento READY ser emitido.
+        Retorna True se o cliente ficou pronto dentro do prazo, False caso contrário.
+        """
+        if self._store_ready:
+            return True
+
+        ready_event = asyncio.Event()
+
+        def _on_ready(*_args: Any) -> None:
+            if not ready_event.is_set():
+                ready_event.set()
+
+        self.on(Events.READY, _on_ready)
+        try:
+            await asyncio.wait_for(ready_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            self.logger.warning("Timeout aguardando READY (%.1fs).", timeout or 0)
+            return False
+        finally:
+            with suppress(Exception):
+                self.remove_listener(Events.READY, _on_ready)
+
+    async def __aenter__(self) -> "Client":
+        await self.initialize()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.destroy()
+
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
     async def _emit(self, event: str, *args: Any) -> None:
-        try:
-            result = self.emit(event, *args)
-            if asyncio.iscoroutine(result):
-                await result
-        except Exception as exc:  # pragma: no cover - log defensivo
-            self.logger.exception("Erro ao emitir evento %s: %s", event, exc)
+        listeners = list(self.listeners(event))
+        for listener in listeners:
+            try:
+                result = listener(*args)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:  # pragma: no cover - log defensivo
+                self.logger.exception("Erro ao emitir evento %s no listener %r", event, listener)
