@@ -19,7 +19,8 @@ class MessageMedia:
         path = Path(file_path)
         if not path.is_file():
             raise FileNotFoundError(f"Arquivo não encontrado: {file_path}")
-        mimetype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        mimetype = mimetypes.guess_type(
+            path.name)[0] or "application/octet-stream"
         data = base64.b64encode(path.read_bytes()).decode()
         return cls(mimetype=mimetype, data=data, filename=path.name, filesize=path.stat().st_size)
 
@@ -91,10 +92,10 @@ class Message:
         return cls(
             id=msg_id,
             body=payload.get("body") or "",
-            from_me=bool(payload.get("id", {}).get("fromMe", payload.get("fromMe", False))),
+            from_me=bool(payload.get("id", {}).get(
+                "fromMe", payload.get("fromMe", False))),
             chat_id=chat_id,
             timestamp=payload.get("t") or payload.get("timestamp"),
             type=payload.get("type") or payload.get("messageType", "unknown"),
             raw=payload,
         )
-

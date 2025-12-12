@@ -111,7 +111,8 @@ class PickleAuth(AuthStrategy):
                     storage_state = pickle.load(f)
                 logger.info("Sessão carregada de %s", self.pickle_file)
             except Exception as exc:  # pragma: no cover - resiliência de IO
-                logger.warning("Não foi possível carregar sessão de %s: %s", self.pickle_file, exc)
+                logger.warning(
+                    "Não foi possível carregar sessão de %s: %s", self.pickle_file, exc)
                 storage_state = None
 
         # Cria o contexto com ou sem storage_state
@@ -146,7 +147,8 @@ class PickleAuth(AuthStrategy):
                                         origin_data["localStorage"]
                                     )
                                 except Exception:
-                                    logger.debug("Falha ao restaurar localStorage em uma página.")
+                                    logger.debug(
+                                        "Falha ao restaurar localStorage em uma página.")
             except Exception as exc:  # pragma: no cover - resiliência de IO/JS
                 logger.warning("Erro ao restaurar estado salvo: %s", exc)
 
@@ -163,7 +165,8 @@ class PickleAuth(AuthStrategy):
                 pickle.dump(storage_state, f)
             logger.info("Sessão salva em %s", self.pickle_file)
         except Exception as exc:  # pragma: no cover - resiliência de IO
-            logger.exception("Erro ao salvar sessão em %s", self.pickle_file, exc_info=exc)
+            logger.exception("Erro ao salvar sessão em %s",
+                             self.pickle_file, exc_info=exc)
 
     async def destroy(self) -> None:
         """Salva a sessão antes de destruir."""

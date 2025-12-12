@@ -100,14 +100,16 @@ class Client(AsyncIOEventEmitter):
                 await self.context.close()
                 self.context = None
         except Exception:
-            self.logger.debug("Ignorando erro ao fechar contexto.", exc_info=True)
+            self.logger.debug(
+                "Ignorando erro ao fechar contexto.", exc_info=True)
 
         try:
             if self.playwright:
                 await self.playwright.stop()
                 self.playwright = None
         except Exception:
-            self.logger.debug("Ignorando erro ao parar playwright.", exc_info=True)
+            self.logger.debug(
+                "Ignorando erro ao parar playwright.", exc_info=True)
 
         with suppress(Exception):
             await self.options.auth_strategy.destroy()
@@ -183,7 +185,8 @@ class Client(AsyncIOEventEmitter):
             if self._store_ready:
                 return
             if not self.page:
-                raise RuntimeError("Página não inicializada para bootstrap do Store.")
+                raise RuntimeError(
+                    "Página não inicializada para bootstrap do Store.")
 
             await self.page.evaluate(wrap_commonjs(self._scripts["store"], "ExposeStore"))
             await self.page.evaluate(wrap_commonjs(self._scripts["utils"], "LoadUtils"))
@@ -319,7 +322,8 @@ class Client(AsyncIOEventEmitter):
             await asyncio.wait_for(ready_event.wait(), timeout=timeout)
             return True
         except asyncio.TimeoutError:
-            self.logger.warning("Timeout aguardando READY (%.1fs).", timeout or 0)
+            self.logger.warning(
+                "Timeout aguardando READY (%.1fs).", timeout or 0)
             return False
         finally:
             with suppress(Exception):
@@ -343,4 +347,5 @@ class Client(AsyncIOEventEmitter):
                 if inspect.isawaitable(result):
                     await result
             except Exception:  # pragma: no cover - log defensivo
-                self.logger.exception("Erro ao emitir evento %s no listener %r", event, listener)
+                self.logger.exception(
+                    "Erro ao emitir evento %s no listener %r", event, listener)

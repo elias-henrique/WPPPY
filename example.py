@@ -53,7 +53,8 @@ async def main() -> None:
         client.on(Events.MESSAGE, on_message)
 
         if not await client.wait_until_ready(timeout=120):
-            raise TimeoutError("Tempo excedido aguardando o WhatsApp ficar pronto.")
+            raise TimeoutError(
+                "Tempo excedido aguardando o WhatsApp ficar pronto.")
 
         stop_event = asyncio.Event()
         _install_signal_handlers(stop_event)
